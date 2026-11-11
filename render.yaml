@@ -1,0 +1,38 @@
+# Render Blueprint: one Docker web service (API + web UI) and a managed PostgreSQL database.
+# Render dashboard -> New -> Blueprint -> select this repository.
+databases:
+  - name: debo-dairy-db
+    plan: 0.1c-256mb
+    databaseName: debo_dairy
+    user: debo
+
+services:
+  - type: web
+    name: debo-dairy
+    runtime: docker
+    plan: 0.5c-512mb          # paid plan: uploaded photos need a persistent disk, which free services do not support
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    disk:
+      name: uploads
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: debo-dairy-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CORS_ORIGIN
+        sync: false            # your public URL, e.g. https://debo-dairy.onrender.com
+      - key: FORCE_HTTPS
+        value: "true"
+      - key: TELEBIRR_MODE
+        value: sandbox
+      - key: BOOTSTRAP_ADMIN_EMAIL
+        sync: false
+      - key: BOOTSTRAP_ADMIN_PASSWORD
+        sync: false

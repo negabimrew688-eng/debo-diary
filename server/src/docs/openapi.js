@@ -1,0 +1,141 @@
+// OpenAPI 3 description of the Debo Dairy API (served at /api/docs).
+const sec = [{ bearerAuth: [] }];
+const idParam = [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }];
+const json = (props, required = []) => ({
+  required: true,
+  content: { 'application/json': { schema: { type: 'object', required, properties: props } } },
+});
+const num = { type: 'number' };
+const str = { type: 'string' };
+
+const op = (tag, summary, { body, params, auth = true, roles, query } = {}) => ({
+  tags: [tag],
+  summary: roles ? `${summary} (${roles})` : summary,
+  ...(auth ? { security: sec } : {}),
+  ...(params ? { parameters: params } : {}),
+  ...(query ? { parameters: query } : {}),
+  ...(body ? { requestBody: body } : {}),
+  responses: { 200: { description: 'OK' }, 400: { description: 'Validation error' }, 401: { description: 'Not authenticated' }, 403: { description: 'Forbidden for this role' }, 404: { description: 'Not found' }, 409: { description: 'State conflict' } },
+});
+const q = (...names) => names.map((n) => ({ name: n, in: 'query', schema: str }));
+
+export const openapi = {
+  openapi: '3.0.3',
+  info: {
+    title: 'Debo Dairy API',
+    version: '1.0.0',
+    description:
+      'AI-assisted dairy marketplace for Ethiopia. Milk Check estimates added-water % from lactometer, temperature, fat and conductivity readings (screening estimate, not a lab result). Payments run through a Telebirr SANDBOX adapter; live Telebirr is not enabled.',
+  },
+  servers: [{ url: '/api/v1' }],
+  components: { securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' } } },
+  paths: {
+    '/auth/register': { post: op('Auth', 'Register farmer, buyer, feed_supplier or transporter', { auth: false, body: json({ email: str, password: str, full_name: str, role: { type: 'string', enum: ['farmer', 'buyer', 'feed_supplier', 'transporter'] }, phone: str, region: str, profile: { type: 'object' } }, ['email', 'password', 'full_name', 'role']) }) },
+    '/auth/login': { post: op('Auth', 'Log in, returns JWT', { auth: false, body: json({ email: str, password: str }, ['email', 'password']) }) },
+    '/auth/me': { get: op('Auth', 'Current user and role profile'), patch: op('Auth', 'Update own profile') },
+    '/uploads': { post: op('Auth', 'Upload a JPEG/PNG/WebP image (max 5 MB), returns its URL') },
+
+    '/farmer/dashboard': { get: op('Farmer', 'Stats, grade mix, escrow, reputation', { roles: 'farmer' }) },
+    '/farmer/cows': { get: op('Farmer', 'List cows', { roles: 'farmer' }), post: op('Farmer', 'Register a cow', { roles: 'farmer', body: json({ tag: str, breed: str, age_months: num, lactating: { type: 'boolean' }, daily_yield_litres: num }, ['tag']) }) },
+    '/farmer/cows/{id}': { patch: op('Farmer', 'Update a cow', { params: idParam, roles: 'farmer' }), delete: op('Farmer', 'Remove a cow', { params: idParam, roles: 'farmer' }) },
+    '/farmer/batches': { get: op('Farmer', 'List own milk batches with latest test', { roles: 'farmer' }), post: op('Farmer', 'Create a milk batch', { roles: 'farmer', body: json({ volume_litres: num, produced_at: str, collection_location: str, latitude: num, longitude: num }, ['volume_litres', 'produced_at', 'collection_location']) }) },
+    '/farmer/batches/{id}': { get: op('Farmer', 'Batch with all tests', { params: idParam, roles: 'farmer' }) },
+    '/farmer/batches/{id}/tests': { post: op('Milk Check', 'Submit readings, get water estimate, grade and recommended price', { params: idParam, roles: 'farmer', body: json({ lactometer_reading: num, temperature_c: num, fat_percent: num, conductivity_ms: num, image_brightness: num, image_url: str, notes: str }, ['lactometer_reading', 'temperature_c']) }) },
+    '/farmer/batches/{id}/list': { post: op('Farmer', 'List a tested A/B batch for sale (test must be < 12 h old)', { params: idParam, roles: 'farmer', body: json({ asking_price: num }) }) },
+    '/farmer/batches/{id}/withdraw': { post: op('Farmer', 'Withdraw a batch', { params: idParam, roles: 'farmer' }) },
+    '/farmer/feed-recommendations': { get: op('Farmer', 'AI-assisted feed plan per cow with cheapest suitable product', { roles: 'farmer' }) },
+
+    '/marketplace/batches': { get: op('Marketplace', 'Browse listed milk', { roles: 'buyer', query: q('location', 'min_volume', 'max_price', 'grade', 'sort', 'limit') }) },
+    '/marketplace/batches/{id}': { get: op('Marketplace', 'Batch quality report', { params: idParam, roles: 'buyer' }) },
+    '/marketplace/compare': { get: op('Marketplace', 'Compare 2-4 batches/suppliers: ?ids=a,b,c', { roles: 'buyer', query: q('ids') }) },
+
+    '/orders': { get: op('Orders', 'Orders scoped to the caller role'), post: op('Orders', 'Place a milk order (reserves volume)', { roles: 'buyer', body: json({ batch_id: str, volume_litres: num, delivery_address: str }, ['batch_id', 'volume_litres', 'delivery_address']) }) },
+    '/orders/{id}': { get: op('Orders', 'Order with tests, payments, deliveries and disputes', { params: idParam }) },
+    '/orders/{id}/cancel': { post: op('Orders', 'Cancel an unpaid order', { params: idParam, roles: 'buyer' }) },
+    '/orders/{id}/pay': { post: op('Payments', 'Start Telebirr payment (sandbox)', { params: idParam, roles: 'buyer' }) },
+    '/orders/{id}/payment/sandbox-confirm': { post: op('Payments', 'Simulate the Telebirr notification; funds go into escrow', { params: idParam, roles: 'buyer', body: json({ outcome: { type: 'string', enum: ['success', 'fail'] } }) }) },
+    '/orders/{id}/delivery': { post: op('Transport', 'Request delivery: choose a transporter or auto-assign', { params: idParam, roles: 'buyer, admin', body: json({ transporter_id: str, pickup_note: str }) }) },
+    '/orders/{id}/confirm-receipt': { post: op('Orders', 'Record delivery quality check; matching grade releases escrow', { params: idParam, roles: 'buyer', body: json({ lactometer_reading: num, temperature_c: num, fat_percent: num, accept_anyway: { type: 'boolean' } }, ['lactometer_reading', 'temperature_c']) }) },
+    '/orders/{id}/dispute': { post: op('Disputes', 'Open a dispute on a delivered order', { params: idParam, roles: 'buyer', body: json({ reason: str, evidence_url: str }, ['reason']) }) },
+
+    '/transport/available': { get: op('Transport', 'Available transporters', { roles: 'buyer, admin' }) },
+
+
+    // ---- Dairy products, buyer, delivery partner, notifications, assistant
+    '/products/categories': { get: op('Products', 'Product categories') },
+    '/products': { get: op('Products', 'Browse dairy products (search, category, region, price range, stock, sort)', { roles: 'buyer, farmer, admin', query: q('search', 'category_id', 'region', 'min_price', 'max_price', 'in_stock', 'sort', 'seller_id') }) },
+    '/products/compare': { get: op('Products', 'Price comparison across sellers', { roles: 'buyer, admin', query: q('search', 'category_id') }) },
+    '/products/{id}': { get: op('Products', 'Product detail with reviews', { params: idParam, roles: 'buyer, farmer, admin' }) },
+    '/farmer/products': { get: op('Products', 'My products', { roles: 'farmer' }), post: op('Products', 'Add product', { roles: 'farmer', body: json({ name: str, unit: str, price: num, stock: num, category_id: str }, ['name', 'price', 'stock']) }) },
+    '/farmer/products/{id}': { patch: op('Products', 'Update product, stock or visibility', { params: idParam, roles: 'farmer' }), delete: op('Products', 'Remove product (hidden if it has orders)', { params: idParam, roles: 'farmer' }) },
+    '/farmer/product-orders': { get: op('Products', 'Orders for my products', { roles: 'farmer' }) },
+    '/farmer/product-orders/{id}/status': { post: op('Products', 'confirmed, processing, ready_for_pickup, delivered (self pickup)', { params: idParam, roles: 'farmer', body: json({ status: str }, ['status']) }) },
+    '/buyer/dashboard': { get: op('Buyer', 'Stats, favourite suppliers, recent purchases, monthly spending', { roles: 'buyer' }) },
+    '/buyer/cart': { get: op('Buyer', 'Cart', { roles: 'buyer' }), post: op('Buyer', 'Add to cart', { roles: 'buyer', body: json({ product_id: str, quantity: num }, ['product_id', 'quantity']) }) },
+    '/buyer/cart/{id}': { put: op('Buyer', 'Change quantity', { params: idParam, roles: 'buyer', body: json({ quantity: num }, ['quantity']) }), delete: op('Buyer', 'Remove item', { params: idParam, roles: 'buyer' }) },
+    '/buyer/orders': { get: op('Buyer', 'All my orders (product and milk) with unified status', { roles: 'buyer', query: q('status') }), post: op('Buyer', 'Checkout: one order per seller, stock reserved', { roles: 'buyer', body: json({ delivery_option: { type: 'string', enum: ['delivery', 'self_pickup'] }, address_id: str, delivery_notes: str }) }) },
+    '/buyer/orders/{id}': { get: op('Buyer', 'Order detail: items, timeline, delivery partner, confirmation code', { params: idParam, roles: 'buyer' }) },
+    '/buyer/orders/{id}/pay': { post: op('Buyer', 'Start Telebirr payment (sandbox)', { params: idParam, roles: 'buyer' }) },
+    '/buyer/orders/{id}/payment/sandbox-confirm': { post: op('Buyer', 'Simulate the Telebirr result (sandbox only)', { params: idParam, roles: 'buyer', body: json({ outcome: { type: 'string', enum: ['success', 'fail'] } }) }) },
+    '/buyer/orders/{id}/cancel': { post: op('Buyer', 'Cancel while pending or confirmed; paid orders are refunded (sandbox) and stock restored', { params: idParam, roles: 'buyer' }) },
+    '/buyer/orders/{id}/confirm': { post: op('Buyer', 'Confirm delivery received', { params: idParam, roles: 'buyer' }) },
+    '/buyer/orders/{id}/receipt': { get: op('Buyer', 'Receipt data (JSON)', { params: idParam, roles: 'buyer' }) },
+    '/buyer/addresses': { get: op('Buyer', 'Saved addresses', { roles: 'buyer' }), post: op('Buyer', 'Add address', { roles: 'buyer', body: json({ address: str, label: str, city: str, region: str }, ['address']) }) },
+    '/buyer/addresses/{id}': { put: op('Buyer', 'Update address / make default', { params: idParam, roles: 'buyer' }), delete: op('Buyer', 'Delete address', { params: idParam, roles: 'buyer' }) },
+    '/buyer/reviews': { post: op('Buyer', 'Review a delivered order (one per order)', { roles: 'buyer', body: json({ order_kind: str, order_id: str, product_rating: num, delivery_rating: num, review: str }, ['order_kind', 'order_id', 'product_rating']) }) },
+    '/notifications': { get: op('Notifications', 'My notifications') },
+    '/notifications/unread-count': { get: op('Notifications', 'Unread count') },
+    '/notifications/read': { post: op('Notifications', 'Mark read (ids, or all when omitted)') },
+    '/assistant/chat': { post: op('Assistant', 'Rule-based assistant over the caller\'s own data; message text is not stored', { body: json({ message: str, channel: { type: 'string', enum: ['text', 'voice'] } }, ['message']) }) },
+    '/delivery/dashboard': { get: op('Delivery', 'Counts, earnings, performance, availability', { roles: 'transporter' }) },
+    '/delivery/assignments': { get: op('Delivery', 'My assignments', { roles: 'transporter', query: q('status') }) },
+    '/delivery/assignments/{id}': { get: op('Delivery', 'Assignment detail (customer contact only after accepting)', { params: idParam, roles: 'transporter' }) },
+    '/delivery/assignments/{id}/accept': { post: op('Delivery', 'Accept', { params: idParam, roles: 'transporter' }) },
+    '/delivery/assignments/{id}/reject': { post: op('Delivery', 'Reject (offered to another partner)', { params: idParam, roles: 'transporter' }) },
+    '/delivery/assignments/{id}/pickup': { post: op('Delivery', 'stage start = heading to pickup; confirm = items collected', { params: idParam, roles: 'transporter', body: json({ stage: { type: 'string', enum: ['start', 'confirm'] } }) }) },
+    '/delivery/assignments/{id}/start': { post: op('Delivery', 'Start delivery (in transit)', { params: idParam, roles: 'transporter' }) },
+    '/delivery/assignments/{id}/complete': { post: op('Delivery', 'Complete with the buyer\'s 6-digit code, notes and photo; 5 wrong codes lock 15 min', { params: idParam, roles: 'transporter', body: json({ code: str, notes: str, photo_url: str }, ['code']) }) },
+    '/delivery/assignments/{id}/location': { post: op('Delivery', 'Share GPS position (only while active, only if the partner opts in)', { params: idParam, roles: 'transporter', body: json({ latitude: num, longitude: num }, ['latitude', 'longitude']) }) },
+    '/delivery/earnings': { get: op('Delivery', 'Day/week/month totals, daily chart, transactions', { roles: 'transporter' }) },
+    '/delivery/profile': { put: op('Delivery', 'Update profile and vehicle', { roles: 'transporter' }) },
+    '/delivery/availability': { put: op('Delivery', 'available, busy or offline', { roles: 'transporter', body: json({ availability_status: { type: 'string', enum: ['available', 'busy', 'offline'] } }, ['availability_status']) }) },
+    '/auth/change-password': { post: op('Auth', 'Change password', { body: json({ current_password: str, new_password: str }, ['current_password', 'new_password']) }) },
+    '/admin/categories': { get: op('Admin', 'Categories', { roles: 'admin' }), post: op('Admin', 'Add category', { roles: 'admin' }) },
+    '/admin/categories/{id}': { patch: op('Admin', 'Rename / enable / disable category', { params: idParam, roles: 'admin' }) },
+    '/admin/products': { get: op('Admin', 'All products', { roles: 'admin' }) },
+    '/admin/products/{id}': { patch: op('Admin', 'Hide or restore a product', { params: idParam, roles: 'admin' }) },
+    '/admin/product-orders': { get: op('Admin', 'All product orders', { roles: 'admin' }) },
+    '/admin/deliveries': { get: op('Admin', 'All deliveries and orders awaiting a partner', { roles: 'admin' }) },
+    '/admin/deliveries/assign': { post: op('Admin', 'Manually assign a delivery partner', { roles: 'admin', body: json({ order_kind: str, order_id: str, transporter_id: str }, ['order_kind', 'order_id', 'transporter_id']) }) },
+    '/admin/earnings': { get: op('Admin', 'Partner earnings', { roles: 'admin' }) },
+    '/admin/earnings/{id}/pay': { post: op('Admin', 'Record that a partner payout was made', { params: idParam, roles: 'admin' }) },
+    '/admin/reviews': { get: op('Admin', 'Buyer reviews', { roles: 'admin' }) },
+    '/admin/ai-usage': { get: op('Admin', 'Assistant usage counts only (no message text)', { roles: 'admin' }) },
+
+    '/feed/products': { get: op('Feed', 'Browse in-stock feed', { roles: 'farmer', query: q('q', 'category') }) },
+    '/feed/my-products': { get: op('Feed', 'My products', { roles: 'feed_supplier' }), post: op('Feed', 'Add product', { roles: 'feed_supplier' }) },
+    '/feed/my-products/{id}': { patch: op('Feed', 'Update product / stock', { params: idParam, roles: 'feed_supplier' }), delete: op('Feed', 'Delete or deactivate', { params: idParam, roles: 'feed_supplier' }) },
+    '/feed/orders': { get: op('Feed', 'Feed orders', { roles: 'farmer, feed_supplier' }), post: op('Feed', 'Order feed', { roles: 'farmer' }) },
+    '/feed/orders/{id}/status': { post: op('Feed', 'accepted, delivered, cancelled', { params: idParam, roles: 'farmer, feed_supplier' }) },
+    '/feed/demand': { get: op('Feed', 'Estimated farmer demand by region and your top products', { roles: 'feed_supplier' }) },
+
+    '/byproducts': { get: op('Byproducts', 'Browse compost and dairy byproduct listings'), post: op('Byproducts', 'List compost / manure / whey', { roles: 'farmer' }) },
+    '/byproducts/mine': { get: op('Byproducts', 'My listings', { roles: 'farmer' }) },
+    '/byproducts/{id}/status': { post: op('Byproducts', 'available, sold, withdrawn', { params: idParam, roles: 'farmer' }) },
+
+    '/admin/stats': { get: op('Admin', 'Platform KPIs', { roles: 'admin' }) },
+    '/admin/trends': { get: op('Admin', 'Weekly quality trend', { roles: 'admin' }) },
+    '/admin/users': { get: op('Admin', 'List users', { roles: 'admin', query: q('role', 'q') }) },
+    '/admin/users/{id}': { patch: op('Admin', 'Enable/disable, mark Fayda verified', { params: idParam, roles: 'admin' }) },
+    '/admin/tests': { get: op('Admin', 'All milk tests', { roles: 'admin' }) },
+    '/admin/audit': { get: op('Admin', 'Audit log', { roles: 'admin' }) },
+    '/admin/disputes': { get: op('Admin', 'Disputes with both quality checks', { roles: 'admin' }) },
+    '/admin/disputes/{id}/resolve': { post: op('Admin', 'refund_buyer or release_to_farmer', { params: idParam, roles: 'admin', body: json({ decision: { type: 'string', enum: ['refund_buyer', 'release_to_farmer'] }, note: str }, ['decision', 'note']) }) },
+    '/admin/settings': { get: op('Admin', 'Pricing, grading thresholds, model baselines', { roles: 'admin' }), put: op('Admin', 'Update settings', { roles: 'admin' }) },
+    '/admin/calibration': { get: op('Admin', 'Calibration samples, fitted line and error diagnostics (RMSE, MAE, bias, residuals, outliers, grade agreement, warnings)', { roles: 'admin' }), post: op('Admin', 'Add a known-water-percent sample', { roles: 'admin' }) },
+    '/admin/calibration/preview': { post: op('Admin', 'Run readings through the current model and the generic baseline', { roles: 'admin', body: json({ lactometer_reading: num, temperature_c: num, fat_percent: num, conductivity_ms: num }, ['lactometer_reading', 'temperature_c']) }) },
+    '/admin/calibration/apply': { post: op('Admin', 'Fit and activate calibration (>= 8 samples)', { roles: 'admin' }) },
+    '/admin/calibration/active': { delete: op('Admin', 'Revert to default baselines', { roles: 'admin' }) },
+    '/ussd': { post: op('USSD', "Africa's Talking-style USSD callback (form fields phoneNumber, text)", { auth: false }) },
+  },
+};
